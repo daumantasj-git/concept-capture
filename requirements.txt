@@ -1,0 +1,6 @@
+# Python 3.13. Įdiegia setup.ps1 į .venv\ (ranka: .venv\Scripts\python.exe -m pip install -r requirements.txt)
+faster-whisper==1.2.1
+# contrib, ne opencv-python: reikia cv2.ximgproc (guided filter, src/flatten.py). Abu kartu nediegti – rašo į tą patį cv2.
+opencv-contrib-python==5.0.0.93
+numpy==2.5.4
+PyYAML==6.0.3

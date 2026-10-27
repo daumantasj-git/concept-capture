@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="lt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#8250df">
+<title>Apdorojimo eiga</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#6a737d; --accent:#8250df; --ok:#1a7f37; --err:#cf222e; --warn:#9a6700; --line:#d8dee4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --card:#161b22; --text:#e6edf3; --muted:#8b949e; --accent:#a371f7; --ok:#3fb950; --err:#f85149; --warn:#d29922; --line:#30363d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0 auto; max-width:760px; padding:16px; padding-bottom:40px; font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  h1 { font-size:20px; margin:0 0 12px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  h1 a { font-size:14px; font-weight:400; color:var(--accent); text-decoration:none; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  .row { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+  .title { font-weight:600; font-size:18px; }
+  .big { font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .meta { font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .bar { height:12px; background:var(--line); border-radius:999px; overflow:hidden; margin:8px 0; }
+  .bar > div { height:100%; background:var(--accent); transition:width .6s; }
+  .bar.small { height:6px; margin:4px 0 0; }
+  .bar.done > div { background:var(--ok); } .bar.failed > div { background:var(--err); }
+  .phases { list-style:none; margin:12px 0 0; padding:0; }
+  .phases li { padding:8px 0; border-top:1px solid var(--line); }
+  /* flex-wrap: siaurame telefone skaičiai persikelia po pavadinimu, o ne išstumia kortelę už ekrano */
+  .phases .name { display:flex; flex-wrap:wrap; gap:2px 8px; align-items:baseline; }
+  .phases .icon { width:20px; flex:none; text-align:center; }
+  .phases .label { flex:1 1 auto; min-width:0; }
+  .phases .right { font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums; margin-left:auto; text-align:right; }
+  .row { flex-wrap:wrap; }
+  .phases .note { font-size:13px; color:var(--muted); margin-left:28px; word-break:break-word; }
+  .pending .label { color:var(--muted); }
+  .badge { font-size:13px; padding:2px 8px; border-radius:999px; border:1px solid currentColor; }
+  .ok { color:var(--ok); } .err { color:var(--err); } .warn { color:var(--warn); } .muted { color:var(--muted); }
+  .alert { margin-top:8px; font-size:14px; }
+</style>
+</head>
+<body>
+  <h1>📊 Apdorojimo eiga <a id="back" href="#">← įkėlimas</a></h1>
+  <div id="runs" class="muted">Kraunama…</div>
+  <p class="meta">Atsinaujina kas 2 s. Likęs laikas yra <b>įvertinimas</b>: jis skaičiuojamas iš greičio iki šiol ir tikslėja einant procesui.</p>
+
+<script>
+  const token = new URLSearchParams(location.search).get('t') || '';
+  document.getElementById('back').href = '/?t=' + encodeURIComponent(token);
+  const STALE_S = 120; // tiek laiko be atnaujinimo = įtartina
+
+  // Trukmė žmogui: "45 s", "12 min", "1 h 05 min".
+  function dur(s) {
+    if (s == null || !isFinite(s)) return '—';
+    s = Math.max(0, Math.round(s));
+    if (s < 60) return s + ' s';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + ' min';
+    return Math.floor(m / 60) + ' h ' + String(m % 60).padStart(2, '0') + ' min';
+  }
+  const clock = t => new Date(t * 1000).toLocaleTimeString('lt-LT', { hour: '2-digit', minute: '2-digit' });
+
+  function fraction(ph) {
+    if (ph.status === 'done' || ph.status === 'skipped') return 1;
+    if (ph.status === 'running' && ph.total) return Math.min(ph.done / ph.total, 0.99);
+    return 0;
+  }
+
+  // Likęs laikas vienam vykdomam žingsniui: greitis iki šiol (done per elapsed) × kas liko.
+  // Pirmas 5 s ir 1 % neskaičiuojam – per mažai duomenų, ETA šokinėtų.
+  function phaseEta(ph, now) {
+    if (ph.status !== 'running' || !ph.total || !ph.done) return null;
+    const elapsed = now - ph.started;
+    if (elapsed < 5 || ph.done / ph.total < 0.01) return null;
+    return elapsed * (ph.total - ph.done) / ph.done;
+  }
+
+  // Visos eigos ETA:
+  //   secPerWeight – kiek sekundžių trunka vienas svorio vienetas šiame kompiuteryje
+  //                  (iš baigtų ir vykdomų žingsnių faktinio greičio);
+  //   vykdomi žingsniai vyksta lygiagrečiai, todėl imamas ilgiausias jų ETA, o ne suma;
+  //   laukiantys žingsniai = svoris × secPerWeight.
+  function overall(run, now) {
+    const phases = run.phases;
+    const active = phases.filter(p => p.status !== 'skipped');
+    const wSum = active.reduce((a, p) => a + p.weight, 0) || 1;
+    const frac = active.reduce((a, p) => a + p.weight * fraction(p), 0) / wSum;
+
+    let spentS = 0, spentW = 0;
+    for (const p of active) {
+      if (p.status === 'done' && p.started && p.finished) { spentS += p.finished - p.started; spentW += p.weight; }
+      else if (p.status === 'running' && p.started) {
+        const f = fraction(p);
+        if (f > 0.02) { spentS += now - p.started; spentW += p.weight * f; }
+      }
+    }
+    const secPerWeight = spentW > 0 ? spentS / spentW : null;
+
+    let runningEta = 0, unknown = false;
+    for (const p of phases.filter(p => p.status === 'running')) {
+      let e = phaseEta(p, now);
+      if (e == null && secPerWeight) e = Math.max(0, p.weight * secPerWeight - (now - p.started));
+      if (e == null) unknown = true; else runningEta = Math.max(runningEta, e);
+    }
+    const pendingW = phases.filter(p => p.status === 'pending').reduce((a, p) => a + p.weight, 0);
+    const eta = unknown || (pendingW && !secPerWeight) ? null : runningEta + pendingW * (secPerWeight || 0);
+    return { frac, eta };
+  }
+
+  function unitText(ph) {
+    if (!ph.total) return ph.done ? String(Math.round(ph.done)) : '';
+    const u = ph.unit === 's' ? 's garso' : (ph.unit || '');
+    return `${Math.round(ph.done)} / ${Math.round(ph.total)} ${u}`;
+  }
+
+  const ICON = { pending: '○', running: '⏳', done: '✓', skipped: '↷', failed: '✗' };
+  const CLS = { done: 'ok', skipped: 'muted', failed: 'err', running: '', pending: 'muted' };
+
+  function renderRun(run, now) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const { frac, eta } = overall(run, now);
+    const pct = run.status === 'done' ? 100 : Math.floor(frac * 100);
+    const age = now - run.updated;
+    const dead = run.phases.some(p => p.status === 'running' && p.alive === false);
+
+    let badge, alert = '';
+    if (run.status === 'done') badge = '<span class="badge ok">baigta</span>';
+    else if (run.status === 'waiting') {
+      badge = '<span class="badge warn">laukia tavęs</span>';
+      alert = `<div class="alert warn"></div>`; // tekstas įrašomas per textContent žemiau
+    }
+    else if (run.status === 'failed') badge = '<span class="badge err">klaida</span>';
+    else if (dead) {
+      badge = '<span class="badge err">sustojo</span>';
+      alert = '<div class="alert err">Procesas nebeveikia, bet žingsnis nebaigtas. Turbūt nulūžo arba buvo nutrauktas. Paprašyk Claude pažiūrėti.</div>';
+    } else if (age > STALE_S && run.phases.some(p => p.status === 'running' && p.pid)) {
+      badge = '<span class="badge warn">vyksta?</span>';
+      alert = `<div class="alert warn">Jau ${dur(age)} negauta jokių žinių. Gal kompiuteris užmigo?</div>`;
+    } else badge = '<span class="badge">vyksta</span>';
+
+    const end = run.finished || now;
+    let etaText;
+    if (run.status === 'done') etaText = `užtruko ${dur(end - run.started)}`;
+    else if (run.status === 'failed') etaText = `sustojo po ${dur(end - run.started)}`;
+    else if (run.status === 'waiting') etaText = `sustabdyta po ${dur(end - run.started)}`;
+    else etaText = eta == null ? 'likęs laikas: skaičiuojama…' : `liko ≈ ${dur(eta)} · pabaiga ~${clock(now + eta)}`;
+
+    card.innerHTML = `
+      <div class="row"><span class="title"></span>${badge}</div>
+      <div class="row"><span class="big">${pct}%</span><span class="meta">${etaText}</span></div>
+      <div class="bar ${run.status === 'done' ? 'done' : run.status === 'failed' ? 'failed' : ''}"><div style="width:${pct}%"></div></div>
+      <div class="meta">pradėta ${clock(run.started)} · praėjo ${dur(end - run.started)} · atnaujinta prieš ${dur(age)}</div>
+      ${alert}
+      <ul class="phases"></ul>`;
+    card.querySelector('.title').textContent = run.id;
+    if (run.status === 'waiting') card.querySelector('.alert').textContent = '⏸ ' + (run.note || 'laukia autoriaus');
+    if (run.error) {
+      const e = document.createElement('div'); e.className = 'alert err'; e.textContent = '✗ ' + run.error;
+      card.insertBefore(e, card.querySelector('.phases'));
+    }
+
+    const ul = card.querySelector('.phases');
+    for (const ph of run.phases) {
+      const li = document.createElement('li');
+      li.className = ph.status;
+      let right = '';
+      if (ph.status === 'running') {
+        const e = phaseEta(ph, now);
+        right = [unitText(ph), ph.total ? Math.floor(fraction(ph) * 100) + '%' : '', e != null ? 'liko ≈ ' + dur(e) : '']
+          .filter(Boolean).join(' · ');
+      } else if ((ph.status === 'done' || ph.status === 'failed') && ph.started && ph.finished) {
+        right = dur(ph.finished - ph.started);
+      }
+      li.innerHTML = `
+        <div class="name"><span class="icon ${CLS[ph.status] || ''}">${ICON[ph.status] || '?'}</span>
+          <span class="label"></span><span class="right">${right}</span></div>
+        ${ph.status === 'running' && ph.total ? `<div class="bar small" style="margin-left:28px"><div style="width:${fraction(ph) * 100}%"></div></div>` : ''}
+        <div class="note"></div>`;
+      li.querySelector('.label').textContent = ph.label;
+      li.querySelector('.note').textContent = ph.note || '';
+      ul.appendChild(li);
+    }
+    return card;
+  }
+
+  async function refresh() {
+    const el = document.getElementById('runs');
+    try {
+      const r = await fetch('/api/eiga?t=' + encodeURIComponent(token), { cache: 'no-store' });
+      if (!r.ok) throw new Error(await r.text());
+      const { now, runs } = await r.json();
+      if (!runs.length) { el.className = 'muted'; el.textContent = 'Kol kas nieko neapdorota.'; return; }
+      el.className = '';
+      el.replaceChildren(...runs.map(run => renderRun(run, now)));
+    } catch (e) {
+      el.className = 'err';
+      el.textContent = 'Nepavyko pasiekti serverio: ' + e.message;
+    }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>

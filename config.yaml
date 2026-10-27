@@ -1,0 +1,85 @@
+﻿# Visi pipeline'o slenksčiai ir parametrai. Prie reikšmės – iš kur ji gauta:
+#   patvirtinta = išmatuota šiame kompiuteryje / šiame įraše;  įvertinimas = pradinė, dar kalibruoti.
+
+# Šio kompiuterio parametrus (resources, audio.device/compute_type/parallel_parts) setup.ps1 įrašo į
+# config.local.yaml – jis perrašo čia esančias reikšmes ir į git nepatenka. Čia – atsarginės reikšmės.
+
+resources:
+  # Vienas procesas, gijos: whisper (ctranslate2) ir OpenCV atleidžia GIL, todėl gijos tikrai dirba lygiagrečiai.
+  # Iš šių matavimų išvestos src/machine.py taisyklės kitiems kompiuteriams.
+  # Benchmark 2026-10-27, Ryzen 7 4700U (8 branduoliai, be CUDA), 120 s ištrauka. Viskas = whisper ir kadrai kartu
+  # (bendrą laiką lemia whisper):
+  #   B(3 gijos) + whisper 1 dalis × 6 gijos ... 91 s   (buvęs nustatymas)
+  #   B(3 gijos) + whisper 2 dalys × 4 gijos ... 82 s
+  #   B(3 gijos) + whisper 2 dalys × 3 gijos ... 77 s   ← pasirinkta
+  #   A(4 procesai) + whisper 2 × 4 .......... 76 s   – A kadrams laimi tik 1 s, o reikalautų perrašyti būsenos logiką
+  #   A(8 procesai), tada whisper 1 × 8 ...... ~95 s
+  # Vien kadrai: B+D 40 s, B pilna raiška 131 s (įvykių tiek pat: 23 vs 24) → D (540 px) būtinas, ne perteklinis.
+  #   A: 2 proc. 38 s, 4 – 26 s, 6 – 24 s, 8 – 23 s (nuo 4 procesų beveik nebeauga).
+  # Vien whisper (1 dalis): 4 gijos 85 s, 6 – 76 s, 8 – 72 s; 2 dalys × 4 – 54 s; 4 × 2 – 89 s; batched(8) – 74 s.
+  whisper_threads: 3        # gijų VIENAI daliai (audio.parallel_parts) – iš viso 2 × 3 = 6
+  frame_workers: 3          # gijos lapo ištiesinimui / išlyginimui / rašalo kaukei
+  hw_decode: true           # patvirtinta 2026-10-27 (Radeon, 60 s): D3D11 per OpenCV 11,1x realaus laiko, CPU 132%;
+                            # be jo 3,9x, CPU 220%. Jei GPU dekodavimas neveikia, OpenCV pats grįžta į CPU.
+
+audio:
+  model: large-v3-turbo
+  device: cpu               # cuda – jei yra NVIDIA ir veikia CUDA (setup.ps1 patikrina)
+  compute_type: int8        # cpu: int8; cuda: float16
+  language: lt
+  beam_size: 5
+  vad_filter: true
+  # false: kiekvienas langas nepriklauso nuo ankstesnio teksto – mažiau „užsiciklinimo“ ir prisigalvojimo
+  # pauzėse (įvertinimas). Žodynas vis tiek perduodamas kiekvienam langui per hotwords.
+  condition_on_previous_text: false
+  # Garsas dalinamas tyliose vietose ir dalys transkribuojamos lygiagrečiai (žr. resources). Kokybė: transkripcijos
+  # panašumas į bazinę 0,80 – tiek pat, kiek įprastų paleidimų tarpusavyje (0,785), t.y. pjūvis kokybės nemažina.
+  parallel_parts: 2
+
+frames:
+  sample_fps: 4                 # CLAUDE.md pradinė reikšmė (įvertinimas)
+  # Kiek pasukti ištiesintą lapą (0 / 90 / 180 / 270° pagal laikrodžio rodyklę), kad tekstas būtų skaitomas.
+  # 90: telefonas vertikaliai, lapas guli gulsčias ir tekstas kadre eina iš apačios į viršų (pirmas kalibravimo
+  # įrašas). Jei pages/*.jpg išeina pasvirę ar apversti – keisk config.local.yaml.
+  read_rotation: 90
+  analysis_long_side: 960       # D variantas: ištiesinto lapo raiška analizei (galutiniai lapai – 1600 → 800)
+  # Rašalas = plona tamsi linija: black-hat branduolys (px, analizės raiška). Flomasteris ~2–4 px, pieštukas ~1–2 px,
+  # flomasterio korpusas ~30 px – jis per storas, todėl rašalu nelaikomas. (įvertinimas)
+  ink_kernel_px: 9
+  ink_contrast: 0.18            # kiek tamsesnis už aplinkinį popierių (dalis); pieštukui reikia žemo (įvertinimas)
+  confirm_s: 2.0                # tiek laiko matomas be rankos → patvirtintas rašalas (CLAUDE.md „~2 s nejuda“)
+  unconfirm_s: 2.0              # patvirtintas, bet tiek laiko matomas kaip tuščias popierius → klaida, atšaukti
+  hand_dilate_px: 15            # aplink ranką „nematoma“ zona (pirštų kraštai, šešėlis, rašiklis)
+  border_px: 6                  # lapo kraštų juosta be rašalo (stalo likučiai); puslapio nr. prasideda ~8 px (video001_calib)
+  match_px: 2                   # tolerancija lyginant su patvirtintu rašalu (kampų paklaida) (įvertinimas)
+  event_gap_s: 3.0              # tiek laiko be naujo rašalo → užbaigiamas įvykis
+  event_merge_px: 15            # arčiau esantys brūkšniai jungiami į vieną įvykį
+  max_event_s: 15               # ilgiausias įvykis, jei piešiama be pertraukų (įvertinimas)
+  halo_age_s: 5                 # pikselis šalia rašalo, patvirtinto prieš daugiau nei tiek s, – linijos pakraštys, ne naujas piešinys
+  event_min_px: 40              # mažesni įvykiai atmetami (triukšmas) (įvertinimas)
+  page_missing_frac: 0.5        # tiek matomo patvirtinto rašalo dingo → naujas lapas (įvertinimas)
+  page_missing_s: 2.0
+  min_page_s: 10                # trumpesnis lapas be naujo piešinio – pereinamasis (lapas dar dedamas), atmetamas
+  final_window_s: 60            # galutinis lapo vaizdas: kadrai (kas ~2 s) iš paskutinės lapo minutės,
+                                # kiekvienam pikseliui – naujausias neuždengtas rankos
+  final_frames: 9               # atsarginė mediana ten, kur ranka buvo visuose kadruose
+  final_missing_max: 0.15       # galutiniam vaizdui netinka kadras, kuriame dingo > 15% matomo rašalo (lapas jau keliamas)
+  final_occluder_dilate: 2.0    # galutiniame vaizde zona aplink ranką/rašiklį x kartų platesnė nei analizėje:
+                                # siauresnė palieka smėlines rankos pakraščių „siūles“ (video001_calib 2 lapas)
+
+align:
+  # Blokas = iš eilės tos pačios gijos (spalvos) įvykiai viename lape (video001: 131 įvykis per smulkūs analizei).
+  # Autoriaus vertinimas 2026-10-27 (video001): 20 s / 90 s davė 30 blokų – per mažai, norėta 1,5–2× detaliau.
+  # Išmatuota video001: 20/90 → 30, 8/30 → 45, 5/30 → 51, 5/20 → 60 blokų. Pasirinkta 5/30 (vid. blokas ~12 s).
+  block_gap_s: 5                # didesnė pertrauka – naujas blokas
+  block_max_s: 30               # ilgiausias blokas
+  block_min_px: 80              # mažesni blokai – triukšmas (video001 1 lapo tušti „kita“ rėmeliai) (įvertinimas)
+  # Kalbos langas siaurintas nuo CLAUDE.md ±15 s: kai blokai ~12 s, ±15 s langai beveik visiškai persidengia ir
+  # kiekvienas blokas gauna tą patį tekstą. Prieš – ilgiau (autorius pirma pasako, tada piešia). (įvertinimas)
+  speech_before_s: 10
+  speech_after_s: 8
+
+export:
+  page_long_side: 800           # CLAUDE.md tokenų taisyklės
+  thumb_long_side: 400
+  crop_max_side: 400

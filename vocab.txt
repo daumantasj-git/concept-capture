@@ -1,0 +1,13 @@
+# Žodynas whisper'iui (hotwords + initial_prompt): terminai, kuriuos dažnai sakai ir kuriuos whisper gali
+# iškraipyti. Vienas terminas eilutėje, # = komentaras. Čia – tik bendri terminai. Savo terminus (ypač darbo
+# sistemų ar firmų pavadinimus) rašyk į asmeninis/vocab.txt: jis prijungiamas automatiškai ir į git nepatenka.
+# Ką whisper sugadina, matosi work/transcript.json. Per ilgas sąrašas (> ~50 terminų) gali pradėti trukdyti.
+ERP
+ETL
+SQL
+API
+HTTP
+JSON
+XML
+query
+join

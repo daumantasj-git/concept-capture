@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="lt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#8250df">
+<title>Koncepcijų video</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#6a737d; --accent:#8250df; --ok:#1a7f37; --err:#cf222e; --warn:#9a6700; --line:#d8dee4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --card:#161b22; --text:#e6edf3; --muted:#8b949e; --accent:#a371f7; --ok:#3fb950; --err:#f85149; --warn:#d29922; --line:#30363d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; padding-bottom:40px; font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  h1 { font-size:20px; margin:0 0 12px; }
+  .label { font-size:13px; color:var(--muted); margin:20px 0 8px; text-transform:uppercase; letter-spacing:.04em; }
+  .big { display:block; width:100%; padding:22px; font-size:20px; font-weight:600; border:0; border-radius:14px; background:var(--accent); color:#fff; text-align:center; }
+  .big.disabled { opacity:.5; pointer-events:none; }
+  .small { display:inline-block; padding:8px 12px; font-size:14px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--text); }
+  input[type=file] { display:none; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:8px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .title { font-weight:600; }
+  .meta { font-size:13px; color:var(--muted); margin-top:2px; word-break:break-all; }
+  .bar { height:10px; background:var(--line); border-radius:999px; overflow:hidden; margin:10px 0 6px; }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .3s; }
+  .hint { font-size:14px; color:var(--warn); margin-top:10px; }
+  .ok { color:var(--ok); } .err { color:var(--err); } .muted { color:var(--muted); }
+  .actions { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+  <h1>🎥 Koncepcijų video <a id="eigaLink" href="#" style="font-size:14px;font-weight:400;color:var(--accent);text-decoration:none;float:right">📊 eiga</a></h1>
+
+  <label class="big" id="pickLabel" for="vid">🎥 Įkelti video</label>
+  <input id="vid" type="file" accept="video/*">
+  <div class="hint">⚠️ Kol keliasi, laikyk šį puslapį atidarytą ir neužrakink ekrano. Jei nutrūks, tiesiog vėl pasirink tą patį video: įkėlimas tęsis nuo ten, kur sustojo.</div>
+
+  <div class="card" id="progress" hidden>
+    <div class="row"><span class="title" id="pTitle">…</span><span id="pPct">0%</span></div>
+    <div class="bar"><div id="pBar"></div></div>
+    <div class="meta" id="pMeta"></div>
+  </div>
+
+  <div class="label">Įrašai (sessions/)</div>
+  <div id="sessions" class="muted">…</div>
+
+  <!-- Viena bendra nuotraukų įvestis: į kurią sesiją dėti, nustatoma paspaudus mygtuką prie sesijos. -->
+  <input id="photoCam" type="file" accept="image/*" capture="environment">
+  <input id="photoGal" type="file" accept="image/*" multiple>
+
+<script>
+  // Raktas ateina iš adreso (?t=...) – siunčiamas su kiekvienu užklausimu.
+  const token = new URLSearchParams(location.search).get('t') || '';
+  const CHUNK = __CHUNK__; // dalies dydis, ateina iš server.js
+  const api = (p, params = {}) => `/api/${p}?` + new URLSearchParams({ t: token, ...params });
+  const $ = id => document.getElementById(id);
+  $('eigaLink').href = '/eiga?t=' + encodeURIComponent(token);
+  const mb = b => (b / 1024 / 1024).toFixed(0) + ' MB';
+
+  // Kad pasirinkus tą patį failą po nutrūkimo būtų tęsiama, o ne kuriamas naujas videoNNN,
+  // įsimenam failo "pirštų atspaudą" (vardas + dydis + data) ir jam priskirtą sesiją.
+  const fp = f => `${f.name}|${f.size}|${f.lastModified}`;
+  function loadResume() { try { return JSON.parse(localStorage.getItem('resume') || '{}'); } catch { return {}; } }
+  function saveResume(m) { try { localStorage.setItem('resume', JSON.stringify(m)); } catch {} }
+
+  // Viena dalis per XHR (ne fetch), nes tik XHR rodo siuntimo progresą.
+  function putChunk(id, offset, blob, onProgress) {
+    return new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      x.open('PUT', api('video/dalis', { id, offset }));
+      x.upload.onprogress = e => onProgress(e.loaded);
+      x.onload = () => {
+        let data = {};
+        try { data = JSON.parse(x.responseText); } catch {}
+        if (x.status === 200 || x.status === 409) resolve(data); // 409 = serveris pasako tikrą offset
+        else reject(new Error(x.responseText || ('HTTP ' + x.status)));
+      };
+      x.onerror = () => reject(new Error('ryšys nutrūko'));
+      x.ontimeout = () => reject(new Error('baigėsi laikas'));
+      x.timeout = 5 * 60 * 1000;
+      x.send(blob);
+    });
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  async function uploadVideo(file) {
+    $('pickLabel').classList.add('disabled');
+    $('progress').hidden = false;
+    $('pTitle').textContent = file.name;
+    const setStatus = (html, cls = '') => { $('pMeta').className = 'meta ' + cls; $('pMeta').innerHTML = html; };
+
+    try {
+      const resume = loadResume();
+      let id = resume[fp(file)];
+      let received = 0;
+
+      if (id) {
+        const r = await fetch(api('video/busena', { id }));
+        if (r.ok) {
+          const s = await r.json();
+          if (s.complete) { setStatus(`Šis video jau įkeltas: ${id}`, 'ok'); return; }
+          received = s.received;
+        } else id = null; // sesija ištrinta – pradedam iš naujo
+      }
+      if (!id) {
+        const r = await fetch(api('video/pradeti', { name: file.name, size: file.size, type: file.type }), { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        id = (await r.json()).id;
+        resume[fp(file)] = id; saveResume(resume);
+      }
+      $('pTitle').textContent = `${id} ← ${file.name}`;
+
+      const t0 = Date.now(), startBytes = received;
+      let failures = 0;
+      while (received < file.size) {
+        const end = Math.min(received + CHUNK, file.size);
+        try {
+          const res = await putChunk(id, received, file.slice(received, end), loaded => {
+            const done = received + loaded;
+            const pct = Math.floor(done / file.size * 100);
+            const speed = (done - startBytes) / ((Date.now() - t0) / 1000 || 1);
+            const eta = speed > 0 ? Math.round((file.size - done) / speed / 60) : '?';
+            $('pPct').textContent = pct + '%';
+            $('pBar').style.width = pct + '%';
+            setStatus(`${mb(done)} / ${mb(file.size)} · ${(speed / 1024 / 1024).toFixed(1)} MB/s · liko ~${eta} min`);
+          });
+          if (typeof res.received !== 'number') throw new Error('keistas serverio atsakymas');
+          if (res.busy) await sleep(2000);
+          received = res.received;
+          failures = 0;
+        } catch (e) {
+          // Wi-Fi trūkinėja – kartojam su pauze. Po 20 nesėkmių iš eilės sustojam (galima tęsti pasirinkus failą vėl).
+          if (++failures > 20) throw e;
+          setStatus(`⏳ ${e.message}, bandau vėl (${failures}/20)…`, 'err');
+          await sleep(Math.min(30000, 1000 * failures * 2));
+          try {
+            const s = await (await fetch(api('video/busena', { id }))).json();
+            received = s.received;
+          } catch {}
+        }
+      }
+
+      const r = await fetch(api('video/baigti', { id }), { method: 'POST' });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      delete resume[fp(file)]; saveResume(resume);
+      $('pPct').textContent = '100%'; $('pBar').style.width = '100%';
+      setStatus(`✓ Įkelta: ${data.file}. Jei turi lapų nuotraukų, pridėk jas žemiau prie ${id}.`, 'ok');
+    } catch (e) {
+      setStatus(`✗ ${e.message}. Pasirink tą patį video dar kartą ir įkėlimas tęsis.`, 'err');
+    } finally {
+      $('pickLabel').classList.remove('disabled');
+      refreshSessions();
+    }
+  }
+
+  $('vid').onchange = e => {
+    const f = e.target.files[0];
+    e.target.value = ''; // kad tą patį failą būtų galima pasirinkti vėl
+    if (f) uploadVideo(f);
+  };
+
+  // ---------- Lapų nuotraukos ----------
+  let photoTarget = null;
+  function pickPhotos(id, camera) { photoTarget = id; (camera ? $('photoCam') : $('photoGal')).click(); }
+
+  async function uploadPhotos(input) {
+    const files = [...input.files];
+    input.value = '';
+    const id = photoTarget;
+    const st = document.querySelector(`[data-photo-status="${id}"]`);
+    for (let i = 0; i < files.length; i++) {
+      if (st) { st.className = 'meta'; st.textContent = `⏳ nuotrauka ${i + 1}/${files.length}…`; }
+      try {
+        const r = await fetch(api('nuotrauka', { id }), { method: 'POST', headers: { 'Content-Type': files[i].type || 'image/jpeg' }, body: files[i] });
+        if (!r.ok) throw new Error(await r.text());
+      } catch (e) {
+        if (st) { st.className = 'meta err'; st.textContent = '✗ ' + e.message; }
+        return;
+      }
+    }
+    refreshSessions();
+  }
+  $('photoCam').onchange = e => uploadPhotos(e.target);
+  $('photoGal').onchange = e => uploadPhotos(e.target);
+
+  // ---------- Sesijų sąrašas ----------
+  async function refreshSessions() {
+    const el = $('sessions');
+    try {
+      const list = await (await fetch(api('sesijos'))).json();
+      if (!list.length) { el.className = 'muted'; el.textContent = 'Dar nieko neįkelta'; return; }
+      el.className = '';
+      el.innerHTML = '';
+      for (const s of list) {
+        const card = document.createElement('div');
+        card.className = 'card';
+        const state = s.complete
+          ? (s.processed ? '<span class="ok">✓ apdorota</span>' : '<span class="ok">✓ įkelta, laukia</span>')
+          : `<span class="err">nebaigta ${Math.floor(s.received / (s.size || 1) * 100)}%</span>`;
+        card.innerHTML = `
+          <div class="row"><span class="title">${s.id}</span>${state}</div>
+          <div class="meta"></div>
+          <div class="actions">
+            <button class="small" data-cam>📷 Lapo nuotrauka</button>
+            <button class="small" data-gal>🖼️ Iš galerijos</button>
+          </div>
+          <div class="meta" data-photo-status="${s.id}"></div>`;
+        // Failo vardas įrašomas per textContent – jis ateina iš telefono, todėl ne per innerHTML.
+        card.querySelector('.meta').textContent =
+          `${s.original_name || '—'} · ${mb(s.size)} · ${s.started || ''} · lapų nuotraukų: ${s.photos}`;
+        card.querySelector('[data-cam]').onclick = () => pickPhotos(s.id, true);
+        card.querySelector('[data-gal]').onclick = () => pickPhotos(s.id, false);
+        el.appendChild(card);
+      }
+    } catch { el.className = 'err'; el.textContent = 'Nepavyko pasiekti serverio'; }
+  }
+  refreshSessions();
+</script>
+</body>
+</html>
